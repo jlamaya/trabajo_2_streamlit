@@ -24,11 +24,11 @@ def ensure_groq() -> Groq:
         st.stop()
     return Groq(api_key=key)
 
-def ask_groq(prompt: str, model: str = "llama-3.1-8b-instant", temperature: float = 0.2) -> str:
+def ask_groq(messages, model: str = "llama-3.1-8b-instant", temperature: float = 0.2) -> str:
     client = ensure_groq()
     resp = client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=messages,
         temperature=temperature,
     )
     return resp.choices[0].message.content.strip()
@@ -40,8 +40,6 @@ EXPECTED_COLS = [
     "hour_of_day","cash_type","money","coffee_name","Time_of_Day",
     "Weekday","Month_name","Weekdaysort","Monthsort","Date","Time"
 ]
-WEEKDAY_ORDER = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-WEEKDAY_ES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 
 def validate_dataset(df: pd.DataFrame) -> Tuple[bool, str]:
     msg = []
@@ -49,7 +47,6 @@ def validate_dataset(df: pd.DataFrame) -> Tuple[bool, str]:
         msg.append(f"- El dataset tiene {df.shape[0]} filas (se recomendan ≥ 300).")
     if df.shape[1] < 6:
         msg.append(f"- El dataset tiene {df.shape[1]} columnas (se recomiendan ≥ 6).")
-    # No forzamos columnas exactas, pero avisamos si faltan de las esperadas
     missing = [c for c in EXPECTED_COLS if c not in df.columns]
     if missing:
         msg.append(f"- Faltan columnas esperadas: {missing}")
@@ -57,14 +54,11 @@ def validate_dataset(df: pd.DataFrame) -> Tuple[bool, str]:
 
 def cast_types(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    # numéricas típicas
     for c in ["hour_of_day","money","Weekdaysort","Monthsort"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
-    # fechas/tiempo
     if "Date" in out.columns:
         out["Date"] = pd.to_datetime(out["Date"], errors="coerce", infer_datetime_format=True)
-    # (opcional) si existe una columna datetime completa, se podría crear
     return out
 
 def iqr_outlier_mask(series: pd.Series, k: float = 1.5) -> pd.Series:
@@ -77,38 +71,33 @@ def iqr_outlier_mask(series: pd.Series, k: float = 1.5) -> pd.Series:
     return (series < low) | (series > high)
 
 def compute_insights(df: pd.DataFrame) -> Dict[str, Any]:
-    """ Calcula insights clave para alimentar el LLM y para mostrar en UI. """
+    """ Calcula insights clave para UI/LLM. """
     insights = {}
 
-    # Top café por cantidad y por ingresos
-    if {"coffee_name","money"}.issubset(df.columns):
-        top_coffee_count = df["coffee_name"].value_counts().head(5)
-        top_coffee_money = df.groupby("coffee_name")["money"].sum().sort_values(ascending=False).head(5)
+    if {"coffee_name","money"} <= set(df.columns):
+        top_coffee_count = df["coffee_name"].value_counts().head(10)
+        top_coffee_money = df.groupby("coffee_name")["money"].sum().sort_values(ascending=False).head(10)
         insights["top_coffee_count"] = top_coffee_count.to_dict()
         insights["top_coffee_money"] = top_coffee_money.to_dict()
 
-    # Mejor hora (ingresos)
-    if {"hour_of_day","money"}.issubset(df.columns):
+    if {"hour_of_day","money"} <= set(df.columns):
         money_by_hour = df.groupby("hour_of_day")["money"].sum().sort_values(ascending=False)
         insights["best_hour_by_money"] = money_by_hour.index[0] if not money_by_hour.empty else None
-        insights["money_by_hour_head"] = money_by_hour.head(10).to_dict()
+        insights["money_by_hour"] = money_by_hour.sort_index().to_dict()
 
-    # Mejor día (ingresos)
-    if {"Weekday","money"}.issubset(df.columns):
+    if {"Weekday","money"} <= set(df.columns):
         money_by_day = df.groupby("Weekday")["money"].sum().sort_values(ascending=False)
         insights["best_weekday_by_money"] = money_by_day.index[0] if not money_by_day.empty else None
         insights["money_by_weekday"] = money_by_day.to_dict()
 
-    # Método de pago (participación en ingresos)
-    if {"cash_type","money"}.issubset(df.columns):
-        money_by_cash = (df.groupby("cash_type")["money"].sum()
-                         .sort_values(ascending=False))
-        total_money = money_by_cash.sum() if money_by_cash.size else 0
+    if {"cash_type","money"} <= set(df.columns):
+        money_by_cash = df.groupby("cash_type")["money"].sum().sort_values(ascending=False)
+        total_money = float(money_by_cash.sum()) if money_by_cash.size else 0.0
         share = (money_by_cash / total_money * 100).round(2) if total_money else money_by_cash
+        insights["cash_type_total"] = money_by_cash.to_dict()
         insights["cash_type_share"] = share.to_dict()
 
-    # Mejor mes (ingresos)
-    if {"Monthsort","Month_name","money"}.issubset(df.columns):
+    if {"Monthsort","Month_name","money"} <= set(df.columns):
         tmp = df.groupby(["Monthsort","Month_name"])["money"].sum().reset_index()
         tmp = tmp.sort_values(["Monthsort","Month_name"])
         if not tmp.empty:
@@ -116,31 +105,112 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Any]:
             insights["best_month"] = str(best_row["Month_name"])
             insights["money_by_month"] = dict(zip(tmp["Month_name"], tmp["money"]))
 
+    # Rango de fechas si existe
+    if "Date" in df.columns:
+        insights["date_min"] = str(pd.to_datetime(df["Date"]).min())
+        insights["date_max"] = str(pd.to_datetime(df["Date"]).max())
+
     return insights
 
 def insights_to_bullets(ins: Dict[str, Any]) -> str:
-    """ Resume dict de insights a texto legible (para UI y LLM). """
+    """ Resume dict de insights a texto legible. """
     lines = []
-    if "best_hour_by_money" in ins and ins["best_hour_by_money"] is not None:
+    if ins.get("best_hour_by_money") is not None:
         lines.append(f"- Hora con mayores ingresos: {int(ins['best_hour_by_money'])}.")
-    if "best_weekday_by_money" in ins and ins["best_weekday_by_money"]:
+    if ins.get("best_weekday_by_money"):
         lines.append(f"- Día con mayores ingresos: {ins['best_weekday_by_money']}.")
-    if "best_month" in ins and ins["best_month"]:
+    if ins.get("best_month"):
         lines.append(f"- Mes más fuerte en ingresos: {ins['best_month']}.")
-
     if "cash_type_share" in ins:
         parts = ", ".join([f"{k}: {v:.2f}%" for k, v in ins["cash_type_share"].items()])
         if parts:
             lines.append(f"- Participación por método de pago: {parts}.")
-
     if "top_coffee_count" in ins and ins["top_coffee_count"]:
         top = list(ins["top_coffee_count"].items())[:3]
         lines.append("- Cafés más vendidos (cantidad): " + ", ".join([f"{k} ({v})" for k, v in top]) + ".")
     if "top_coffee_money" in ins and ins["top_coffee_money"]:
-        top = list(ins["top_coffee_money"].items())[:3]
-        lines.append("- Cafés con más ingresos: " + ", ".join([f"{k}" for k, _ in top]) + ".")
+        topm = list(ins["top_coffee_money"].items())[:3]
+        lines.append("- Cafés con más ingresos: " + ", ".join([f"{k}" for k, _ in topm]) + ".")
+    if ins.get("date_min") or ins.get("date_max"):
+        lines.append(f"- Rango de fechas: {ins.get('date_min')} → {ins.get('date_max')}.")
+    return "\n".join(lines) if lines else "(Sin insights calculables)"
 
-    return "\n".join(lines) if lines else "(Sin insights calculables)"""
+def build_llm_context(df: pd.DataFrame, insights: Dict[str, Any], max_cat_levels: int = 15) -> Dict[str, Any]:
+    """
+    Construye un contexto compacto para el LLM basado en datos e insights.
+    Incluye: esquema, nulos, stats numéricas, conteos top de categóricas,
+    y agregados clave.
+    """
+    context: Dict[str, Any] = {}
+    context["shape"] = {"rows": int(df.shape[0]), "cols": int(df.shape[1])}
+    context["schema"] = {c: str(df[c].dtype) for c in df.columns}
+    context["nulls"] = df.isnull().sum().to_dict()
+
+    # Stats numéricas
+    num_cols = df.select_dtypes(include=np.number).columns.tolist()
+    if num_cols:
+        desc = df[num_cols].describe().round(3).to_dict()
+        context["numeric_describe"] = desc
+        # Correlaciones opcionales (evitar matrices gigantes)
+        if len(num_cols) >= 2:
+            corr = df[num_cols].corr(numeric_only=True).round(3)
+            context["numeric_corr"] = corr.to_dict()
+
+    # Conteos top de categóricas
+    cat_cols = [c for c in df.columns if c not in num_cols]
+    top_counts = {}
+    for c in cat_cols:
+        vc = df[c].astype(str).value_counts().head(max_cat_levels).to_dict()
+        top_counts[c] = vc
+    context["categorical_top_counts"] = top_counts
+
+    # Agregados clave (si existen)
+    context["aggregates"] = {}
+    if {"hour_of_day","money"} <= set(df.columns):
+        context["aggregates"]["money_by_hour"] = df.groupby("hour_of_day")["money"].sum().sort_index().round(3).to_dict()
+    if {"Weekday","money"} <= set(df.columns):
+        context["aggregates"]["money_by_weekday"] = df.groupby("Weekday")["money"].sum().round(3).to_dict()
+    if {"Monthsort","Month_name","money"} <= set(df.columns):
+        tmp = df.groupby(["Monthsort","Month_name"])["money"].sum().reset_index().sort_values("Monthsort")
+        context["aggregates"]["money_by_month"] = dict(zip(tmp["Month_name"], tmp["money"].round(3)))
+    if {"cash_type","money"} <= set(df.columns):
+        money_by_cash = df.groupby("cash_type")["money"].sum()
+        total = float(money_by_cash.sum()) if money_by_cash.size else 0.0
+        share = (money_by_cash / total * 100).round(2) if total else money_by_cash
+        context["aggregates"]["money_by_cash_total"] = money_by_cash.round(3).to_dict()
+        context["aggregates"]["money_by_cash_share"] = share.to_dict()
+
+    # Insights ya calculados
+    context["insights"] = insights
+    return context
+
+def answer_with_context(question: str, context: Dict[str, Any], model: str, temperature: float = 0.2) -> str:
+    """
+    Responde usando SOLO el contexto. Si falta info, debe decirlo.
+    """
+    system = (
+        "Eres un analista de datos. Debes responder SOLO usando el contexto proporcionado. "
+        "Si el contexto no tiene la información necesaria, dilo explícitamente y explica qué faltaría. "
+        "Cuando cites cifras, incluye unidades cuando sea obvio (por ejemplo, 'money' como monto). "
+        "Si haces un cálculo, muéstralo brevemente."
+    )
+    user = f"""CONTEXTO (JSON compacto):
+{context}
+
+PREGUNTA:
+{question}
+
+INSTRUCCIONES DE RESPUESTA:
+- Responde en español, breve y claro.
+- No inventes datos más allá del contexto.
+- Si la respuesta requiere datos que no están, dilo y sugiere qué cálculo o dato faltaría.
+"""
+    return ask_groq(
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
+        model=model,
+        temperature=temperature
+    )
 
 # ======================================
 # UI — Barra lateral
@@ -153,7 +223,8 @@ with st.sidebar:
 
     st.header("🤖 Modelo Groq")
     model = st.selectbox("Modelo", ["llama-3.1-8b-instant","llama-3.1-70b-versatile"], index=0)
-    temperature = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05)
+    temperature = st.slider("Temperature", 0.0, 1.0, 0.2, 0.05,
+                            help="Más bajo = respuestas más deterministas; más alto = más creativas.")
 
 # ======================================
 # UI — Contenido principal
@@ -167,11 +238,10 @@ if uploaded is None:
     st.warning("⚠️ Debes subir un archivo CSV para continuar.")
     st.stop()
 
-# Carga
+# Carga y validación
 df_raw = pd.read_csv(uploaded)
 df = cast_types(df_raw)
 
-# Validación
 ok, warn = validate_dataset(df)
 if not ok:
     st.warning(f"Recomendaciones/Advertencias:\n{warn}")
@@ -268,9 +338,8 @@ with viz2:
 # Heatmap hora x día
 if {"Weekdaysort","hour_of_day","money","Weekday"} <= set(df.columns):
     st.markdown("**Heatmap: Suma de 'money' por (día de semana × hora)**")
-    # Mapeo para ordenar días (si existe Weekdaysort)
     pivot = df.pivot_table(index="Weekdaysort", columns="hour_of_day", values="money", aggfunc="sum")
-    # Intentar nombres legibles de días (siempre mostramos lo que haya)
+    # Etiquetas legibles si hay Weekday
     day_names = (df[["Weekdaysort","Weekday"]]
                  .dropna()
                  .drop_duplicates()
@@ -288,8 +357,7 @@ if {"Weekdaysort","hour_of_day","money","Weekday"} <= set(df.columns):
 # Barras por mes
 if {"Monthsort","Month_name","money"} <= set(df.columns):
     st.markdown("**Ingresos por mes (suma)**")
-    by_month = df.groupby(["Monthsort","Month_name"])["money"].sum().reset_index()
-    by_month = by_month.sort_values("Monthsort")
+    by_month = df.groupby(["Monthsort","Month_name"])["money"].sum().reset_index().sort_values("Monthsort")
     fig, ax = plt.subplots()
     sns.barplot(data=by_month, x="Month_name", y="money", ax=ax)
     ax.set_xlabel("Month")
@@ -298,7 +366,7 @@ if {"Monthsort","Month_name","money"} <= set(df.columns):
     st.pyplot(fig)
 
 # =======================
-# Insights + LLM
+# Insights + LLM (resumen)
 # =======================
 st.subheader("🧠 Insights y LLM")
 
@@ -307,7 +375,6 @@ ins_bullets = insights_to_bullets(ins)
 with st.expander("Ver insights calculados (para contexto del LLM)"):
     st.markdown(ins_bullets)
 
-# Prompt de resumen que incluye estructura, nulos y los insights calculados
 summary_prompt = f"""
 Eres un analista de datos. Te doy la estructura básica de un dataset de ventas de café y algunos insights calculados.
 
@@ -326,27 +393,34 @@ Responde en español, claro y sin inventar datos que no estén respaldados por l
 
 if st.button("📄 Generar resumen con LLM"):
     with st.spinner("Consultando Groq…"):
-        resumen = ask_groq(summary_prompt, model=model, temperature=temperature)
+        resumen = ask_groq(
+            messages=[{"role": "user", "content": summary_prompt}],
+            model=model,
+            temperature=temperature
+        )
     st.markdown("### Resumen (LLM)")
     st.write(resumen)
     st.session_state["eda_summary"] = resumen
 
-# Q&A contextualizado con el resumen generado
-if "eda_summary" in st.session_state:
-    st.markdown("### ❓ Preguntas al LLM basadas en el EDA")
-    user_q = st.text_input("Escribe tu pregunta (ej.: ¿Qué café conviene promocionar en la mañana?)")
-    if st.button("Preguntar al LLM"):
-        qa_prompt = f"""
-Contexto de EDA (resumen):
-{st.session_state['eda_summary']}
+# =======================
+# Q&A BASADO EN DATOS (CON CONTEXTO)
+# =======================
+st.subheader("💬 Pregunta al agente (basado en datos e insights)")
 
-Pregunta del usuario:
-{user_q}
+# Construimos el contexto SIEMPRE después del EDA
+llm_context = build_llm_context(df, insights=ins, max_cat_levels=15)
 
-Responde de forma breve y clara en español, usando el contexto y los insights. Si faltan datos, dilo explícitamente.
-"""
+with st.expander("Ver contexto que recibe el LLM (JSON compacto)"):
+    st.json(llm_context)
+
+user_q = st.text_input(
+    "Escribe tu pregunta (ej.: ¿Qué café conviene promocionar en la mañana? ¿Qué día y hora dejan más ingresos?)"
+)
+if st.button("Preguntar al LLM con contexto"):
+    if not user_q.strip():
+        st.warning("Escribe una pregunta primero.")
+    else:
         with st.spinner("Groq pensando…"):
-            ans = ask_groq(qa_prompt, model=model, temperature=temperature)
-        st.markdown("**Respuesta del LLM:**")
+            ans = answer_with_context(user_q, llm_context, model=model, temperature=temperature)
+        st.markdown("**Respuesta del LLM (basada SOLO en el contexto):**")
         st.write(ans)
-
