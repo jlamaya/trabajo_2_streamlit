@@ -251,8 +251,11 @@ with c1:
 with c2:
     st.metric("Columnas", df_view.shape[1])
 with c3:
-    num_cols = df_view.select_dtypes(include=np.number).columns.tolist()
-    st.metric("Cols numéricas", len(num_cols))
+    num_cols = [
+    c for c in df_view.select_dtypes(include=np.number).columns
+    if c not in ["Weekdaysort", "Monthsort"]
+    ]
+
 
 st.subheader("🧱 Tipos de datos")
 st.write(df_view.dtypes)
