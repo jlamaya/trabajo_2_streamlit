@@ -349,7 +349,7 @@ if "Date" in df_view.columns and "money" in df_view.columns:
           .reset_index()
           .sort_values("Date_day"))
     if not ts.empty:
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(6,4))
         sns.lineplot(data=ts, x="Date_day", y="money", marker="o", ax=ax)
         ax.set_xlabel("Date")
         ax.set_ylabel("money (suma)")
@@ -369,7 +369,7 @@ if {"Weekdaysort","hour_of_day","money","Weekday"} <= set(df_view.columns):
         pivot.index = [day_names.set_index("Weekdaysort").loc[i, "Weekday"]
                        if i in day_names["Weekdaysort"].values else i
                        for i in pivot.index]
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(6, 4))
     sns.heatmap(pivot, cmap="Blues", ax=ax)
     ax.set_xlabel("hour_of_day")
     ax.set_ylabel("Weekday")
