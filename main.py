@@ -139,7 +139,7 @@ def build_llm_context(df: pd.DataFrame, insights: Dict[str, Any], max_cat_levels
     """
     Construye un contexto compacto para el LLM basado en datos e insights.
     Incluye: esquema, nulos, stats numéricas, conteos top de categóricas,
-    y agregados clave.
+    agregados clave y combinaciones relevantes.
     """
     context: Dict[str, Any] = {}
     context["shape"] = {"rows": int(df.shape[0]), "cols": int(df.shape[1])}
@@ -151,10 +151,6 @@ def build_llm_context(df: pd.DataFrame, insights: Dict[str, Any], max_cat_levels
     if num_cols:
         desc = df[num_cols].describe().round(3).to_dict()
         context["numeric_describe"] = desc
-        # Correlaciones opcionales (evitar matrices gigantes)
-        if len(num_cols) >= 2:
-            corr = df[num_cols].corr(numeric_only=True).round(3)
-            context["numeric_corr"] = corr.to_dict()
 
     # Conteos top de categóricas
     cat_cols = [c for c in df.columns if c not in num_cols]
@@ -164,12 +160,17 @@ def build_llm_context(df: pd.DataFrame, insights: Dict[str, Any], max_cat_levels
         top_counts[c] = vc
     context["categorical_top_counts"] = top_counts
 
-    # Agregados clave (si existen)
+    # Agregados clave
     context["aggregates"] = {}
+
     if {"hour_of_day","money"} <= set(df.columns):
-        context["aggregates"]["money_by_hour"] = df.groupby("hour_of_day")["money"].sum().sort_index().round(3).to_dict()
+        context["aggregates"]["money_by_hour"] = (
+            df.groupby("hour_of_day")["money"].sum().sort_index().round(3).to_dict()
+        )
     if {"Weekday","money"} <= set(df.columns):
-        context["aggregates"]["money_by_weekday"] = df.groupby("Weekday")["money"].sum().round(3).to_dict()
+        context["aggregates"]["money_by_weekday"] = (
+            df.groupby("Weekday")["money"].sum().round(3).to_dict()
+        )
     if {"Monthsort","Month_name","money"} <= set(df.columns):
         tmp = df.groupby(["Monthsort","Month_name"])["money"].sum().reset_index().sort_values("Monthsort")
         context["aggregates"]["money_by_month"] = dict(zip(tmp["Month_name"], tmp["money"].round(3)))
@@ -179,6 +180,31 @@ def build_llm_context(df: pd.DataFrame, insights: Dict[str, Any], max_cat_levels
         share = (money_by_cash / total * 100).round(2) if total else money_by_cash
         context["aggregates"]["money_by_cash_total"] = money_by_cash.round(3).to_dict()
         context["aggregates"]["money_by_cash_share"] = share.to_dict()
+
+    # 🔥 Agregados cruzados (para preguntas específicas)
+    if {"coffee_name","Month_name"} <= set(df.columns):
+        cross = df.groupby(["Month_name","coffee_name"])["money"].sum().reset_index()
+        pivot = {}
+        for month in cross["Month_name"].unique():
+            subset = cross[cross["Month_name"] == month]
+            pivot[month] = dict(zip(subset["coffee_name"], subset["money"].round(3)))
+        context["aggregates"]["money_by_coffee_and_month"] = pivot
+
+    if {"coffee_name","Weekday"} <= set(df.columns):
+        cross = df.groupby(["Weekday","coffee_name"])["money"].sum().reset_index()
+        pivot = {}
+        for day in cross["Weekday"].unique():
+            subset = cross[cross["Weekday"] == day]
+            pivot[day] = dict(zip(subset["coffee_name"], subset["money"].round(3)))
+        context["aggregates"]["money_by_coffee_and_weekday"] = pivot
+
+    if {"coffee_name","hour_of_day"} <= set(df.columns):
+        cross = df.groupby(["hour_of_day","coffee_name"])["money"].sum().reset_index()
+        pivot = {}
+        for hour in cross["hour_of_day"].unique():
+            subset = cross[cross["hour_of_day"] == hour]
+            pivot[int(hour)] = dict(zip(subset["coffee_name"], subset["money"].round(3)))
+        context["aggregates"]["money_by_coffee_and_hour"] = pivot
 
     # Insights ya calculados
     context["insights"] = insights
